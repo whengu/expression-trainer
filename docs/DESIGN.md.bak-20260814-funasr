@@ -1,0 +1,430 @@
+# 宇宙无敌表达训练系统 — WebUI 版设计文档
+
+> 版本：v1.0（待用户审批）
+> 状态：design-first 设计稿，审批通过后进入编码
+> 2026-08
+
+---
+
+## 1. 项目概述
+
+### 1.1 原版（Electron 桌面版）功能
+
+原版是 Electron 桌面应用，核心功能链为：
+
+```
+浏览器麦克风录音（Web Audio 采集 16kHz PCM）
+  → Electron 主进程 sherpa-onnx 离线流式 ASR
+  → 实时字幕（逐句 + interim 半截稿）
+  → 词库分析（填充词 / 犹豫词 / 笼统词 / 情绪词，纯 JS 词表匹配）
+  → AI 实时反馈（deepseek / openai / ollama / custom 多后端，每 30 字触发）
+  → 结束生成 6 维度报告（总分、亮点、逐句编辑、用词精准度、行为模式、数据）
+```
+
+原版问题（用户已确认）：sherpa-onnx 本地识别性能差（小模型中文准确率一般、初始化重、模型需手动下载约 500MB），且 Electron 壳重、依赖 install 繁琐。
+
+### 1.2 WebUI 版目标
+
+- **纯 Web 架构**：Node.js 后端服务 + 浏览器前端，无 Electron、无 Tauri、无任何桌面壳。
+- **模型全部走 API**：语音转文字走 ASR API（候选：豆包/火山引擎、OpenAI Whisper、阿里云、讯飞），AI 分析走已有 LLM API（deepseek / openai / custom）。
+- **词库分析原样复用**：`data/*.json` + `lib/lexicon.js` 的纯 JS 逻辑零改动迁移。
+- **功能等价**：原版全部功能（录音训练、实时字幕、词库统计、AI 实时反馈、结束报告、粘贴逐字稿分析、自定义 Prompt 编辑器）在浏览器中保留。
+- **部署形态**：本地 `npm start` → 浏览器打开 `http://localhost:<port>` 即用（后续如需可部署到任意 Node 主机/内网）。
+
+### 1.3 项目铁律（AGENTS.md 强制约束，设计必须遵守）
+
+| # | 铁律 | 在本设计中的落实 |
+|---|------|------------------|
+| 1 | **禁止本地安装/部署/运行任何模型**（ASR/LLM 都不行），全部走远程 API；`models/` 不得填充本地模型 | 后端只做 API 转发；`models/` 目录整体移除；**ollama 本地选项砍掉**（见 3.4） |
+| 2 | 除 NPM 依赖外不安装任何东西 | 纯 Node.js + npm 依赖，无 Python、无系统工具链、无模型文件 |
+| 3 | 所有写入只允许在项目目录内 | 配置/日志/临时文件全部落在项目目录（`config/`、`data/`），不写系统临时目录 |
+
+---
+
+## 2. 整体架构
+
+```
+┌─────────────────────────── 浏览器（前端，纯静态） ───────────────────────────┐
+│                                                                              │
+│  index.html / styles.css / app.js（ES Module）                                │
+│                                                                              │
+│  ┌────────────┐   ┌────────────┐   ┌────────────┐   ┌──────────────┐        │
+│  │ 录音模块    │   │ 实时字幕    │   │ 词库统计    │   │ AI 反馈面板   │        │
+│  │ getUserMedia│  │ 高亮渲染    │   │ 填充/犹豫/  │   │ + 报告弹窗    │        │
+│  │ → VAD 切句  │   │            │   │ 笼统/情绪   │   │              │        │
+│  └──────┬─────┘   └─────▲──────┘   └─────▲──────┘   └──────▲───────┘        │
+│         │  WAV 分片      │   字幕/分析     │  分析结果      │  AI 反馈/报告   │
+│         └───────────────┼────────────────┼────────────────┼────────────────┘
+│                    WebSocket（ws://，单通道）          HTTP（fetch）
+└─────────────────────────┼───────────────────────────────────────────────────┘
+                          │
+┌─────────────────────────▼───────────────────────────────────────────────────┐
+│                        Node.js 后端（server/）                              │
+│                                                                             │
+│  ┌────────────────────────────────────────────────────────────┐            │
+│  │ HTTP 服务（Express，托管 public/ 静态资源 + REST API）       │            │
+│  │   GET/POST /api/analyze   词库分析（复用 lib/lexicon.js）    │            │
+│  │   GET/PUT /api/settings   设置读写（服务端 config/settings.json）│        │
+│  │   POST /api/settings/test-llm  LLM 连通性测试               │            │
+│  │   POST /api/report        结束报告（LLM）                   │            │
+│  │   GET  /api/health        健康检查                          │            │
+│  └────────────────────────────────────────────────────────────┘            │
+│  ┌────────────────────────────────────────────────────────────┐            │
+│  │ WebSocket 服务（ws，会话级）                                 │            │
+│  │   收：音频分片(binary) / 命令(JSON)：request-feedback 等     │            │
+│  │   发：asr-final / analysis / ai-feedback / error            │            │
+│  └────────────────────────────────────────────────────────────┘            │
+│  ┌────────────────────────────────────────────────────────────┐            │
+│  │ ASR 适配层（server/asr/client.js，多 Provider 可插拔）       │            │
+│  │   doubao（火山引擎） / openai-whisper / aliyun / iflytek     │            │
+│  └────────────────────────────────────────────────────────────┘            │
+│  ┌────────────────────────────────────────────────────────────┐            │
+│  │ LLM 客户端（复用 lib/ai-feedback.js + lib/prompts.js）       │            │
+│  │   deepseek / openai / custom（OpenAI 兼容）                 │            │
+│  └────────────────────────────────────────────────────────────┘            │
+└──────────────────────────────┬──────────────────────────────────────────────┘
+                               │ HTTPS 出站
+              ┌────────────────┴─────────────────┐
+              ▼                                  ▼
+      ASR API（远程，不允许本地）        LLM API（远程）
+      豆包/Whisper/阿里云/讯飞          deepseek / openai / custom
+```
+
+**数据流一句话**：浏览器录音 → 静音检测切句 → 每句一个 16kHz WAV 分片走 WebSocket → 后端转发给 ASR API → 文本回传 → 后端跑词库分析 → 双结果一并推回前端渲染；AI 反馈与报告由后端按需调 LLM API。
+
+---
+
+## 3. 技术栈选型
+
+### 3.1 后端：Node.js + Express + ws
+
+| 方案 | 评价 |
+|------|------|
+| **Express 5 + ws（推荐）** | 事实标准，生态最大、文档最多；本应用 REST 接口极少（4 个），Express 完全够用；`ws` 是最轻量的 WebSocket 库，功能贴合（无需房间/广播等高级特性） |
+| Node 内置 `http` + 手写路由 | 零依赖但手写路由/静态托管/body 解析繁琐，不值得省一个依赖 |
+| Fastify | 性能更好、schema 校验强，但引入插件体系心智负担，本项目无性能瓶颈 |
+| Koa | 中间件模型更现代，但社区体量不及 Express，团队熟悉度低于 Express |
+
+理由：**最小成本 + 主流性**。本项目后端就是"一个静态托管 + 4 个 REST + 1 个 WebSocket 通道"，Express 是复杂度与生态平衡点。REST 层用 Express，WebSocket 用 `ws`（挂在同一 HTTP server 上，共用端口）。
+
+### 3.2 前端：原生 HTML/JS（ES Module），不引构建链
+
+| 方案 | 评价 |
+|------|------|
+| **原生 JS（推荐）** | 原版已是原生 JS 单类架构（`ExpressionTrainer`），`index.html + styles.css + app.js` 可直接迁移复用（仅把 `window.api.xxx` IPC 调用替换为 fetch / WebSocket）；零构建、零依赖、`node server/index.js` 直接跑 |
+| React/Vue + Vite | 组件化/状态管理更规范，但需要 Node 构建链、产物托管、热更新心智；对单页 3 面板应用是过度设计 |
+| Vue 3 + CDN 运行时 | 无构建链但引入运行时依赖和模板语法迁移成本，收益有限 |
+
+理由：**复用原版 + 避免重型构建链**（用户约束："不要引入不必要的复杂度"）。原版交互逻辑（录制状态机、字幕渲染、统计累加、反馈去重）是纯前端逻辑，与框架无关；迁移成本最低的方式就是保留原生实现。前端仅一个新增依赖需求——ES Module 方式组织文件，浏览器原生支持。
+
+### 3.3 实时通信：WebSocket 为主通道 + HTTP 为辅
+
+| 方案 | 评价 |
+|------|------|
+| **WebSocket（ws，推荐）** | 双向 + 低延迟 + 服务端可主动推送。音频分片是单向"上传"、字幕/AI 反馈是服务端"下发"，一个 ws 通道天然按序承载事件流；协议模型与原版 IPC（invoke 上传 / 事件回传）一一对应，迁移顺畅 |
+| SSE（Server-Sent Events） | 只支持服务端→客户端单向，音频仍需另行 HTTP 上传；对"结果推送"够用，但拆成两套通道（SSE + 音频 POST）复杂度反而高，且无双向控制（如服务端节流/中止会话） |
+| HTTP 轮询 | 实现最笨重：要么前端频繁轮询结果状态（延迟高、浪费请求），要么每次分片都建立 POST/响应闭环（并发乱序需序号协调）；实时字幕体验最差 |
+
+选用 WebSocket 的判断依据：会话期间只有一条低成本长连接；实现上音频分片用 **binary frame**（WAV 字节），命令与结果用 **text frame**（JSON），按 frame 顺序配对即可，无需额外序号协议（见 6.1）。
+
+### 3.4 LLM 反馈后端：沿用 deepseek / openai / custom，**移除 ollama**
+
+原版 4 后端：deepseek、openai、ollama、custom。WebUI 版改为 3 选 1：
+
+| 后端 | 是否保留 | 理由 |
+|------|----------|------|
+| **deepseek（推荐默认）** | ✅ | 国内直连、便宜、中文质量好；原版 README 也推荐 deepseek；用户已有使用经验 |
+| **openai** | ✅ | 质量标杆；但国内网络直连不稳定，作为备选 |
+| **custom** | ✅ | 指向任意远程 OpenAI 兼容端点（Groq / Moonshot / 通义 / 云端 Ollama 等），覆盖长尾需求 |
+| ollama | ❌ **移除** | 默认形态是 `localhost:11434` 本地跑模型，**违反铁律 1**（禁止本地部署/运行模型）。需要 Ollama 能力的用户可通过 custom 指向「远程」Ollama 服务器（遵守铁律，模型不在本机） |
+
+### 3.5 ASR API 选型建议（**最终选型待用户确认**）
+
+对 4 个主流候选的对比（价格为 2026-08 量级参考，**确切价格与接口参数以各厂商官方最新文档为准**）：
+
+| 维度 | 豆包·火山引擎语音识别 | OpenAI Whisper API | 阿里云 Paraformer(百炼/智能语音) | 讯飞实时语音转写 |
+|------|---------------------|--------------------|----------------------------------|------------------|
+| 国内直连 | ✅ 优 | ❌ 需海外网络/代理 | ✅ 优 | ✅ 优 |
+| 接口形态 | 一句话识别 / 录音文件 / WebSocket 流式 | 文件上传（multipart，≤25MB），无流式 | WebSocket 流式 + 录音文件识别 | WebSocket 流式 |
+| 中文口语质量 | 好（中文是主战场） | 好（多语通用） | 好（中文会议/口语优化） | 好（中文+方言） |
+| 认证方式 | 火山引擎 AK/SK（或移动端鉴权） | OpenAI API Key（Bearer） | 阿里云 AccessKey | APPID + APIKey + APISecret |
+| 成本量级 | 低（按秒/分钟计，新用户有免费额度） | $0.006/分钟 | 低（约几毛/小时量级） | 按小时计秒级 |
+| 生态契合度 | **高**：用户已在飞书/豆包生态（Hermes 里已有豆包直调工具），火山控制台开通即可 | 中：需另备海外支付/网络 | 中：需阿里云账号 | 中：需注册讯飞开放平台 |
+
+**推荐排序**：
+1. **首选：豆包（火山引擎）语音识别** — 国内直连、中文口语佳、与用户现有豆包生态一致性最高；分片转写用「一句话识别」（每句 ≤60s，正好匹配本项目 VAD 切句设计）；后续如需更实时可平滑升级到 WebSocket 流式接口（本项目架构已预留）。
+2. 备选：**OpenAI Whisper API** — 若用户已有可直连的 OpenAI key（原版就在用），`whisper-1` / `gpt-4o-transcribe` 开箱即用，接口最简单（一个 multipart POST）；前提是网络可达。
+3. 备选：**阿里云 Paraformer** — 若用户有/更愿意开阿里云账号；流式能力最强，适合把"句级延迟"优化到"字级"。
+
+> ⚠️ **待用户确认**：最终选择哪个 ASR 厂商（涉及是否有对应账号、是否接受开通计费）。设计上做成**可插拔 Provider 适配层**（`server/asr/client.js` 按 `asr.provider` 分发），换厂商只改配置不改业务流程，用户确认前不绑定实现。
+>
+> 接口实现要点（各厂商均支持）：
+> - 输入格式统一约定 **16kHz / 单声道 / PCM-WAV**（本项目浏览器端就是 16kHz PCM，直接编码 WAV 头即可，无需格式转换）；Whisper 同样接受 wav。
+> - 一次转写一个句子分片（5~30s），响应 ~1~3s，满足训练场景的"句级实时"要求。
+
+---
+
+## 4. 模块设计
+
+### 4.1 后端模块
+
+| 模块 | 文件 | 职责 |
+|------|------|------|
+| 入口/装配 | `server/index.js` | 读配置 → 起 HTTP+WS 服务 → 挂路由 → 挂 WS handlers → 监听端口 |
+| 配置管理 | `server/config.js` | 合并 环境变量（`ASR_PROVIDER`/`ASR_API_KEY` 等）与 `config/settings.json`；启动时校验必填项，缺失则启动成功但录音时给友好报错 |
+| 设置管理 | `server/routes/settings.js` | `GET /api/settings`（**API key 脱敏返回**，只回显后 4 位）、`PUT /api/settings`（写 `config/settings.json`）、`POST /api/settings/test-llm`（复用原 `testConnection` 逻辑 → 一键测 LLM 连通） |
+| 词库分析 | `server/routes/analyze.js` | `POST /api/analyze {text}` → 调 `lib/lexicon.js` 的 `loadLexicon()` + `analyzeText()`（**原样复用，零改动**）→ 返回分析结果（粘贴逐字稿模式用） |
+| 报告生成 | `server/routes/report.js` | `POST /api/report {fullText, stats}` → `lib/prompts.js` 组装 → LLM API（max_tokens 8192）→ 返回 Markdown |
+| ASR 转发 | `server/asr/client.js` | Provider 适配（豆包/whisper/阿里云/讯飞，见 3.5）；`transcribe(wavBuffer) → {text}`；超时/重试（单次重试 + 指数退避）；错误归类（欠费/鉴权/网络）转成可读 message 推给前端 |
+| LLM 转发 | `server/llm/client.js` | 由原 `lib/ai-feedback.js` 改造（删掉 ollama 分支；其余 provider 逻辑原样保留）：`sendFeedback(text)`、`sendReport(fullText, stats)`、`testConnection(settings)` |
+| WebSocket | `server/ws/session.js` | 会话生命周期：连接=会话开始，断开=会话结束（清理该会话未完成的 ASR/LLM 请求）；每会话维护 `fullText`、`lastFeedbackAt`（供节流阀使用） |
+| 事件处理 | `server/ws/handlers.js` | 收：`audio` 分片（配二进制帧）→ 调 ASR → 词库分析 → 推 `asr-final`；收 `request-feedback` → 立即触发一次 AI 反馈（绕过节流） |
+| 静态托管 | Express `express.static('public')` | 前端三页面（主界面/设置/提示词编辑）+ 样式 + 脚本，`/` 导向 index.html |
+
+### 4.2 前端模块（迁移自 `src/`，仅替换通信层）
+
+| 模块 | 说明 |
+|------|------|
+| 录音模块 | `getUserMedia({audio:true})` → **Web Audio 节点链**：输入 → 16kHz 重采样（`AudioContext({sampleRate:16000})`，原版同款）→ **VAD 静音切句**（RMS 能量阈值 + 静音尾 400ms 判定句尾）→ 每句编码 WAV Buffer → `ws.send(binary)` |
+| 实时字幕 | 复用原版 `renderSubtitle`/`highlightText` 的视觉逻辑，但**高亮来源升级**：不再用前端硬编码 regex 词表，改用后端 `analysis` 返回的词位（word + 类别），消除两套词表漂移（原版坑点）；interim 半截稿行改为"识别中…"占位（API 分片模式无真正 interim，见 6.1） |
+| 词库统计 | 每句 `asr-final` 携带的 `analysis` 累加 填充/犹豫/笼统/情绪词 计数 + 表达密度；笼统词弹替换建议卡片（复用原版反馈栏交互） |
+| AI 反馈面板 | 接收 `ai-feedback` 事件 → 原版 `classifyFeedback` 分类 → 反馈流（去重、上限 12 条） |
+| 设置页 | 由 `settings.html/js` 迁移：LLM provider（deepseek/openai/custom）+ **ASR provider 及对应凭证** + 触发阈值（默认 50 字）+ 保存时测 LLM 连通（原版交互保留） |
+| 报告生成 | 复用原版报告弹窗 + markdown→html 渲染；**保存改为浏览器原生下载**（`Blob` + `<a download>`，替代原 Electron 保存对话框，REST 版无需后端参与） |
+| 通信层（新增） | `public/api-client.js`：封装 `fetch`（REST）+ WebSocket 单例（自动重连：指数退避 1s/2s/4s/8s 封顶，重连后提示手动重开训练会话，不静默丢数据）；提供与原来 `window.api` 同构的方法名，迁移时替换点唯一 |
+
+---
+
+## 5. 数据与词库
+
+原样复用，不做任何格式改动：
+
+| 文件 | 内容 | 消费方 |
+|------|------|--------|
+| `data/emotion-lexicon.json` | 情绪词库：7 大类、650 词（category/subcategory/强度/极性）+ 笼统词→精准词映射 | `lib/lexicon.js`（后端加载，`loadLexicon()` 已实现，含缺失兜底） |
+| `data/tiered-lexicon.json` | 分层词库 v1：口语高频笼统词（tier1）→ 精准替换候选池（tier2） | 二期（Phase 4）可作为建议增强接入，起决定性建议质量；首期不接，避免与 emotion-lexicon 结果打架 |
+
+- 词库加载时机：后端启动时 `loadLexicon()` 一次，内存驻留；文件热更新不做（改动需重启，在 README 说明）。
+- 分析逻辑（`lib/lexicon.js`）：最大正向匹配分词 + 三类词检测 + 表达密度 + 建议生成，**纯同步纯函数，零改动复用到后端**；它不依赖 Electron/fs 之外的任何东西，天然 Web 兼容。
+- 前端高亮：以 `analysis` 返回词位为准（见 4.2），前端不再内置词表副本。
+
+---
+
+## 6. 关键流程
+
+### 6.1 实时识别流程（分片式，非流式）
+
+选型决定：ASR API 均为"短音频一次转写"形态（豆包一句话识别 / Whisper 文件上传），因此采用**句级分片 + 静音切句**策略，不做伪流式。
+
+```
+① 用户点开始 → getUserMedia 授权 → Web Audio 采集（16kHz mono）
+② VAD：持续计算 RMS；>阈值 = 语音中；连续静音 400ms → 切出一个句子分片
+   （一句话的典型时长 3~10s，一个分片 = 一次 ASR API 调用）
+③ 浏览器把分片编码成 WAV → ws.send([text帧 {type:'audio',seq,durationMs},
+   binary帧 WAV 字节]) —— 按 frame 到达顺序配对
+④ 后端收到 → 调 ASR 适配层 transcribe(wav) → {text}
+   （网络失败：单次重试+退避；API 报错：归类后推 error 事件，该句标记"识别失败"不阻塞后续）
+⑤ 后端文本 → analyzeText() → {analysis}
+⑥ 后端推送：{type:'asr-final', seq, text, analysis}
+⑦ 前端：追加字幕行（词库高亮）→ 累加统计 → 笼统词/填充词即时反馈
+```
+
+**真实时性说明**：从"一句话说完"到"字幕落地"的延迟 ≈ ASR API 耗时（1~3s，取决于句长和厂商）。对"表达训练"场景（人说完才看反馈）可接受；若未来要字级流式，架构已留口子：`server/asr/client.js` 增加 Provider 的 **stream 模式**（豆包/阿里云/讯飞均支持 WebSocket 流式识别），前端 VAD 改为持续上传 1s 小片，流程 ⑥ 增加 `asr-partial` 事件——**列为 Phase 4 可选优化，不在首期范围**。
+
+**与原版的差异**：原版 sherpa-onnx 本地流式有 interim（半截稿随说随显）；API 分片模式下句子确认前只有占位"说完了识别中…"，无半截稿。若体验不达预期，再走流式方案。
+
+### 6.2 AI 实时反馈流程
+
+```
+触发条件（双触发）：
+  A. 自动：session 内 fullText 增量 ≥ 阈值（默认 50 字，设置页可调 30~100，原版为 30）且距上次 AI 反馈 ≥ 冷却 8s（防连续触发轰炸）
+  B. 手动：用户点「反馈」按钮 → 立即触发一次（带冷却 2s 误触保护）
+  触发即记录 lastFeedbackAt / 已反馈字数水位，防止重复
+执行：
+  后端取 session 缓存 fullText（最近 500 字窗口，prompt 模板本身只取 text.slice(-500)）
+  → lib/prompts.js getRealtimePrompt(text, context, customPrompt) 组装
+  → LLM API（max_tokens 150）→ 返回单一短提示
+  → 推 {type:'ai-feedback', text} → 前端 classifyFeedback 分类渲染
+失败处理：LLM 报错 → 推 error 事件，前端气泡提示"实时反馈暂时不可用"，不打断训练
+```
+
+### 6.3 报告生成流程
+
+```
+用户点「生成报告」→ 前端立即展示 loading
+→ POST /api/report {fullText, stats:{duration,totalWords,fillers,hedges,vagueWords}}
+→ 后端 lib/prompts.js getReportPrompt 组装（含 customPrompt 合并，逻辑与现版一致）
+→ LLM API（max_tokens 8192，温度沿用 0.7）→ Markdown 文本
+→ 前端复用原版 markdown→HTML 渲染进弹窗
+→ 操作：📋 复制全文 / 💾 下载（浏览器 Blob 下载 `表达训练-YYYY-MM-DD-HHMM.md`，含原文段）
+失败处理：弹窗内红色错误 + 重试按钮；网络问题提示检查 API 配置
+```
+
+### 6.4 设置保存流程（含一键测试）
+
+```
+设置页 → PUT /api/settings（LLM provider 配置 + ASR provider 配置 + 反馈阈值）
+→ 后端写 config/settings.json（密码脱敏存储见 7.2）
+→ 前端调 POST /api/settings/test-llm → 成功才提示"已保存"，失败停在页面显示错误（原版交互）
+ASR 连通性测试：设置页加「测试 ASR」按钮 → 录 3 秒样音 → 调 transcribe → 显示识别文本（验证 key/计费/网络一次到位）
+```
+
+---
+
+## 7. 设置与配置（API Key 管理）
+
+### 7.1 存储位置与方案对比
+
+| 方案 | 评价 |
+|------|------|
+| **服务端 `config/settings.json`（推荐）** | 与现版 `userData/settings.json` 结构一致（per-provider 结构可整段复用），key 只存在于后端进程内，前端拿不到明文；本项目为**个人本机工具**（localhost，无多用户），该模型简单可靠 |
+| `.env` 环境变量 | 作为**增强项**同时支持：`ASR_PROVIDER`、`ASR_API_KEY`、`LLM_PROVIDER`、`LLM_API_KEY` 等；环境变量优先级高于 settings.json。适合将来部署到服务器/CI 注入密钥 |
+| 浏览器 localStorage | ❌ key 会暴露给任何打开页面的人/脚本（XSS 面），且多浏览器不同步；仅当"无后端纯静态"才考虑，本架构不采用 |
+| 硬编码 | ❌ 铁律禁止（源代码入库即泄露） |
+
+**结论：`config/settings.json`（git 忽略）为主，`.env` 环境变量为覆盖层。** 提供 `config/settings.example.json` 模板（keys 为空）+ `.env.example` 模板，首次运行检测到缺 key 时日志与前端均有引导提示。
+
+### 7.2 存储细节
+
+- `config/` 目录整体加入 `.gitignore`；`.env` 也加入 `.gitignore`（提交 `.env.example` 即可）。
+- settings.json 结构（向后兼容现版字段）：
+
+```jsonc
+{
+  "llm": {
+    "provider": "deepseek",                // deepseek | openai | custom
+    "providers": { /* 原版同构：deepseek{apiKey,model} openai{...} custom{apiKey,baseUrl,model} */ }
+  },
+  "asr": {
+    "provider": "doubao",                  // doubao | openai-whisper | aliyun | iflytek（待用户确认默认值）
+    "doubao":   { "appId": "", "accessToken": "" },   // 火山引擎 AK/SK 或移动端 token
+    "openaiWhisper": { "apiKey": "", "model": "gpt-4o-transcribe" },
+    "aliyun":   { "accessKeyId": "", "accessKeySecret": "" },
+    "iflytek":  { "appId": "", "apiKey": "", "apiSecret": "" }
+  },
+  "feedback": { "autoThresholdChars": 50, "cooldownSec": 8 }
+}
+```
+
+- 安全边界声明：本工具定位个人本机使用，key 明文存于本机项目目录属**可接受风险**（等同原版 Electron 明文 `userData/settings.json`）；若未来要公开部署/多用户，另行引入服务端加密（环境变量注入 + key 脱敏回显已为此预留接口）。
+
+---
+
+## 8. 目录结构规划
+
+```
+expression-trainer/
+├── AGENTS.md                  # 保持（铁律）
+├── README.md                  # 更新：WebUI 版安装/运行/配置说明（Phase 4）
+├── package.json               # 【修改】重写：scripts.start = "node server/index.js"；
+│                              #        移除 electron / sherpa-onnx-node 依赖
+├── .gitignore                 # 【新增】config/、.env、node_modules、*.log
+├── .env.example               # 【新增】环境变量模板（ASR/LLM key 可注入覆盖）
+│
+├── server/                    # 【新增】后端
+│   ├── index.js               #   入口：HTTP + WS 装配
+│   ├── config.js              #   配置加载（env > settings.json）+ 校验
+│   ├── routes/
+│   │   ├── settings.js        #   GET/PUT /api/settings + /api/settings/test-llm
+│   │   ├── analyze.js         #   POST /api/analyze
+│   │   ├── report.js          #   POST /api/report
+│   │   └── health.js          #   GET /api/health
+│   ├── ws/
+│   │   ├── session.js         #   会话状态（fullText/节流水位）
+│   │   └── handlers.js        #   音频帧/命令处理 + 事件推送
+│   ├── asr/
+│   │   └── client.js          #   ASR Provider 适配（豆包/whisper/阿里云/讯飞）
+│   └── llm/
+│       └── client.js          #   LLM 客户端（由 lib/ai-feedback.js 提炼，删 ollama）
+│
+├── public/                    # 【迁移自 src/】前端静态资源（Express 托管）
+│   ├── index.html             #   主界面（原版结构 + 新增「AI 手动反馈」按钮位）
+│   ├── styles.css             #   原样迁移（深色主题/全屏字幕/三面板）
+│   ├── app.js                 #   主逻辑（替换 IPC 调用为 api-client 封装）
+│   ├── api-client.js          #   【新增】fetch + WebSocket 单例 + 重连
+│   ├── settings.html / settings.js   # 设置页（增 ASR 配置区 + 测试按钮）
+│   └── prompt-editor.html / prompt-editor.js   # 自定义提示词编辑器
+│
+├── lib/                       # 【原样保留】纯 JS 逻辑
+│   ├── lexicon.js             #   词库分析（零改动）
+│   ├── prompts.js             #   Prompt 模板（零改动）
+│   └── ai-feedback.js         #   【修改】删 ollama 分支；其余不变（或并入 server/llm/client.js）
+│
+├── data/                      # 【原样保留】
+│   ├── emotion-lexicon.json
+│   └── tiered-lexicon.json
+│
+├── config/                    # 【新增，gitignore】运行时配置
+│   ├── settings.json          #   用户设置（含 API key，不入库）
+│   └── settings.example.json  #   模板（入库）
+│
+├── docs/
+│   └── DESIGN.md              # 本文件
+│
+├── main.js / preload.js       # 【删除】Electron 壳
+├── lsp-verify-test.js         # 【删除】遗留测试文件（或并入测试目录，用户定）
+├── models/                    # 【删除】不再需要本地模型目录（铁律 1）
+└── src/                       # 【迁移】内容进 public/ 后删除
+```
+
+依赖清单（npm）：`express`、`ws`；devDependencies 可加 `nodemon`（可选）。**总共 2~3 个 npm 包**，无其他任何安装。
+
+---
+
+## 9. 实施步骤（分阶段，每阶段可验收）
+
+### Phase 1 — 骨架 + 词库复用（纯 Web 跑通原版"粘贴分析"链路）
+
+- 任务：package.json 重写、`server/index.js` 起服务、静态托管 `public/`、`/api/analyze`、设置读写；迁移 index/styles/app 前端并把 IPC 调用替换为 REST；删除 Electron 壳文件与依赖。
+- 前端适配：`window.api.analyzeText()` → `fetch('/api/analyze')`；其余按钮先占位。
+- **验收标准**：`npm install && npm start` 后浏览器打开首页；「粘贴逐字稿」→ 字幕高亮（笼统词/填充词/犹豫词三类颜色）、统计面板数字正确、AI 反馈按钮见 UI；两端词表结果与原版分析输出一致（可拿原版 README 示例文本对照）。
+
+### Phase 2 — ASR 接入（一句话分片实时识别）
+
+- 任务：录音模块（getUserMedia + VAD + WAV 编码）、WS 通道（会话/音频帧/`asr-final` 事件）、`server/asr/client.js` 第一个 Provider（以用户确认的厂商为准，另留一个适配骨架）。
+- 验收标准：授权麦克风 → 说 3 个不同句子 → 每句说完 1~3s 内字幕逐句出现、高亮与统计随句更新；静音间隙不产生空句；中途断网：字幕区红色提示、恢复后不崩溃；**AI 反馈与报告按钮此阶段可禁用**。
+
+### Phase 3 — AI 反馈 + 报告
+
+- 任务：`server/llm/client.js`（deepseek/openai/custom）、AI 反馈自动/手动触发 + 冷却、设置页（含保留"测试 LLM 连接"）、报告弹窗 + 浏览器下载、自定义 prompt 编辑器接通。
+- 验收标准：连说 2 分钟以上 → 出现 ≥3 条分类反馈（含笼统词替换、正向激励）；点「AI」按钮立即出 1 条；结束生成报告：6 维度齐全、可复制、可下载 .md；设置页改 provider（deepseek↔custom）后测试连接通过再生效。
+
+### Phase 4 — 打磨与上线
+
+- 任务：设置页加「测试 ASR」；错误分级提示（缺 key/鉴权失败/网络/限流）；WS 断线重连体验；README 重写（安装、.env 配置、启动、使用说明）；可选：流式 ASR 升级口子、tiered 词库增强、手机浏览器兼容（录音权限提示）。
+- 验收标准：**首次体验路径 <5 分钟**（clone → npm i → 填两个 key → 浏览器出字幕）；连续训练 30 分钟无崩溃/无静默丢句；README 覆盖全部配置项。
+
+---
+
+## 10. 风险与待确认事项
+
+### 10.1 需要用户拍板的决策（阻塞项）
+
+| # | 事项 | 选项 | 影响 |
+|---|------|------|------|
+| 1 | **ASR 厂商选型**（3.5） | ① 豆包·火山引擎（推荐：国内直连+生态契合+一句话识别够用）② OpenAI Whisper（需网络可达）③ 阿里云 Paraformer（流式最强）| 决定 Phase 2 主要实现与账号开通动作；**需确认用户是否已有对应云账号、是否接受开通计费** |
+| 2 | 触发阈值默认值 | 原版代码是 30 字（README 却写 50 字） | 设计按"默认 50 字、可调 30~100"执行，确认是否接受 |
+| 3 | 删除范围 | `main.js`/`preload.js`/`src/`/`models/`/`lsp-verify-test.js` 直接删（git 历史可找回）还是移入 `archive/` | 决定 Phase 1 是否动"删除"操作 |
+| 4 | 部署形态假设 | 默认 localhost 单机工具；是否需要局域网访问（其他设备打开） | 影响是否要监听 0.0.0.0 + 简单鉴权（如需再议） |
+
+### 10.2 已知风险与缓解
+
+| 风险 | 等级 | 缓解 |
+|------|------|------|
+| ASR API 一字不差前提：VAD 切句把句子切坏（噪声/停顿被切碎或粘连） | 中 | VAD 参数（阈值/静音时长）做成配置可调；Phase 2 验收含"环境噪声下含 3 句的录音"用例；兜底：支持手动合并相邻句（后续小迭代） |
+| API 鉴权/计费未开通导致 Phase 2 卡住 | 高 | Phase 2 前置：ASR Provider 无 key 时启动不崩、UI 给引导文案；「测试 ASR」按钮在 Phase 4 提前到 Phase 2 验收里 |
+| 豆包一句话识别并发/限流（连说时短时间多个分片） | 中 | 后端会话内分片**串行转写**（队列），天然限流；量级（10s/句）远低于配额 |
+| 国内网络到 OpenAI 不稳定（若选 Whisper） | 中 | 适配层隔离，随时切回豆包/阿里云不改前端 |
+| 明文 API key 于 `config/settings.json` | 低（本机自用） | 铁律已有认知；文档 7.2 声明边界；`.gitignore` 保证不入库 |
+| 浏览器录音兼容性（Firefox/Safari） | 低 | Web Audio + getUserMedia 全现代浏览器支持；WAV 编码自己写（无外部依赖），已覆盖 WebKit 差异 |
+
+### 10.3 明确不做（本期范围外）
+
+- ❌ 不做用户系统/多人鉴权（除非 10.1-4 确认为局域网部署）
+- ❌ 不做流式字级字幕（Phase 4 仅留口子）
+- ❌ 不做模型下载/本地推理的任何路径（铁律 1 的防御性表述：即便选项列表里出现"本地"字样的一律砍掉）
+- ❌ 不做移动端 App / PWA 打包
+
+---
+
+*本文档为设计稿，所有"待用户确认"项确认后即最终定稿，Phase 1 起按 §9 顺序实施。*

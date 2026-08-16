@@ -1,147 +1,65 @@
-# 🚀 宇宙无敌表达训练系统 - 本地桌面版
+# 🚀 宇宙无敌表达训练系统（WebUI 版）
 
-> 👉 **在线版已上线：[exprtrain.online](https://exprtrain.online)**，无需安装，打开浏览器即用。支持中英双语。
-
-一个帮你训练口语表达精准度的本地桌面应用。实时语音识别 → 词库匹配 → AI反馈，全程离线+本地处理。
+一个帮你训练口语表达精准度的 Web 应用：**实时语音识别 → 词库匹配 → AI 反馈**。
+由原 Electron 桌面版（fxy2311-youyou/expression-trainer）改造而来：**模型全部走远程 API，本地不落地任何模型**。
 
 ## 功能
 
-- 🎤 **实时语音识别**：基于 Sherpa-ONNX，完全离线，中文优化
-- 📝 **全屏字幕显示**：黑底大字，实时显示你说的每一句话
-- 🔍 **词库分析**：自动检测填充词、犹豫词、笼统词，给出精准替代
-- 🤖 **AI反馈**：支持 Groq/OpenAI/DeepSeek/Ollama 多后端
-- 📊 **分析报告**：6维度深度分析（逻辑/直接性/填充词/密度/词汇/亮点）
+- 🎤 **实时语音识别**：FunASR（自部署，WebSocket 流式）实时转写，边说边出字
+- 📝 **全屏字幕显示**：实时显示每句话，partial/final 渐进更新，词级高亮
+- 🔍 **词库分析**：自动检测填充词、犹豫词、笼统词，给出精准替代建议（本地词库 146+ 情绪词，离线匹配，无延迟）
+- 🤖 **AI 反馈**：每 N 字触发语境化建议（DeepSeek / OpenAI / 自定义 OpenAI 兼容后端）
+- 📊 **分析报告**：结束后 6 维度深度分析（逻辑/直接性/填充词/密度/词汇/亮点）
+- 📋 **粘贴逐字稿**：不录音也能把逐字稿贴进来分析
 
-## 安装
+## 技术栈
 
-### 1. 克隆项目 & 安装依赖
+| 层 | 选型 |
+|----|------|
+| 前端 | 原生 HTML/JS/CSS（零构建，`public/` 直接托管） |
+| 后端 | Node.js + Express + ws |
+| ASR | **FunASR 自部署 WebSocket 流式**（官方协议，不引 SDK） |
+| LLM | DeepSeek / OpenAI / 自定义 OpenAI 兼容（API） |
+| 部署 | Nginx（静态 + 反代）/api 与 /ws |
 
-```bash
-cd expression-trainer
-npm install
-```
-
-### 2. 下载语音识别模型
-
-需要下载 Sherpa-ONNX 的 streaming paraformer 中英双语模型：
-
-```bash
-cd models
-
-# 方法一：使用 wget
-wget https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-paraformer-bilingual-zh-en.tar.bz2
-tar xvf sherpa-onnx-streaming-paraformer-bilingual-zh-en.tar.bz2
-
-# 方法二：使用 huggingface
-# https://huggingface.co/csukuangfj/sherpa-onnx-streaming-paraformer-bilingual-zh-en
-```
-
-下载后 `models/` 目录应包含：
-```
-models/
-└── sherpa-onnx-streaming-paraformer-bilingual-zh-en/
-    ├── encoder.int8.onnx
-    ├── decoder.int8.onnx
-    └── tokens.txt
-```
-### 3. 启动应用
+## 快速开始
 
 ```bash
-npm start
+npm install          # 安装依赖（仅 express + ws，共 68 包零漏洞）
+npm run dev            # 启动 → http://localhost:3000
 ```
 
-### 4. 配置 AI 后端
+> 语法检查（可选）：`npm run check`（node --check 遍历全部 JS）
 
-启动后点击右上角 ⚙️ 进入设置页面。
+## 配置
 
-推荐配置：
+首次使用打开设置页（⚙️）填写：
+- **AI 反馈（LLM）**：选后端 → 填 API Key → 测试连接
+- **语音识别（ASR）**：填 FunASR WebSocket 地址（ws://host:port）与可选 token
+- **反馈触发**：自动反馈阈值（默认 50 字）
 
-| 后端 | 费用 | 速度 | 获取方式 |
-|------|------|------|----------|
-| DeepSeek | 极低 | 快 | [platform.deepseek.com](https://platform.deepseek.com) |
-| OpenAI | 中等 | 快 | [platform.openai.com](https://platform.openai.com) |
-| Ollama | 免费 | 取决于硬件 | [ollama.com](https://ollama.com) 本地运行 |
+配置保存在 `config/settings.json`（可用 `.env` 环境变量覆盖，见 `.env.example`）。
 
-**推荐 deepseek**：生成报告质量高，且成本极低。
+## 部署（Nginx）
 
-## 使用说明
+见 [`deploy/README.md`](deploy/README.md)：打包 → 服务器解包 → Nginx 静态托管 + 反代 /api 与 /ws。
 
-1. **点击「开始录制」** → 对着麦克风说话
-2. **实时字幕**会在屏幕中央显示你说的内容
-3. **左侧面板**实时统计填充词/犹豫词/笼统词
-4. **右侧面板**每50字会给出AI实时反馈
-5. **说完后点击「结束」** → 可以点「生成报告」获取完整分析
-
-## 字幕颜色含义
-
-| 颜色 | 含义 |
-|------|------|
-| 🔴 红色波浪下划线 | 填充词（嗯、啊、那个、然后…） |
-| 🟠 橙色 | 犹豫词（可能、也许、我觉得…） |
-| 🟡 黄色虚线 | 笼统词（有精准替代建议） |
-| 🟢 绿色 | 有力表达（好句子！） |
-
-## 技术架构
+## 项目结构
 
 ```
-┌─────────────────────────────────────────┐
-│ Electron 主进程                          │
-│  ├── Sherpa-ONNX (离线语音识别)          │
-│  ├── 词库匹配 (emotion-lexicon.json)     │
-│  └── AI反馈 (多后端 HTTP API)            │
-├─────────────────────────────────────────┤
-│ 渲染进程 (Chromium)                      │
-│  ├── 全屏字幕显示                        │
-│  ├── 实时统计面板                        │
-│  └── 分析报告弹窗                        │
-└─────────────────────────────────────────┘
+server/            Node 后端（入口、配置、REST 路由、WS 会话、FunASR/LLM 客户端）
+public/            Web 前端（index/styles/app/recorder/api-client/settings）
+lib/               复用原版分析逻辑（lexicon 词库 / prompts 模板，原样保留）
+config/            运行时配置（settings.example.json 模板；settings.json 不入库）
+docs/              设计/实现/任务/决策/FunASR 协议规范
+deploy/            Nginx 配置模板 + 部署指南
+data/              情绪词库数据（emotion-lexicon.json）
 ```
 
-## 词库说明
+## 变更记录
 
-`data/emotion-lexicon.json` 基于大连理工情感词库7大类结构，包含：
-
-- **130+ 情绪词**：分类（喜怒哀惧恶惊）+ 强度（1-9）
-- **笼统词→精准词映射**：25组高频替代建议
-- **填充词表**：24个常见口头禅
-- **犹豫词表**：19个弱化表达
-- **程度词梯度**：弱→中→强→极 四级
-- **画面化描述**：10组「抽象→具象」转换
-- **犹豫→直接转换**：8组对照示例
-
-## 开发
-
-```bash
-# 开发模式（带DevTools）
-npm run dev
-
-# 目录结构
-├── main.js              # Electron主进程
-├── preload.js           # preload脚本
-├── src/
-│   ├── index.html       # 主界面
-│   ├── settings.html    # 设置页
-│   ├── styles.css       # 样式
-│   ├── app.js           # 前端逻辑
-│   └── settings.js      # 设置逻辑
-├── lib/
-│   ├── asr.js           # 语音识别
-│   ├── lexicon.js       # 词库匹配
-│   ├── ai-feedback.js   # AI反馈
-│   └── prompts.js       # Prompt模板
-├── data/
-│   └── emotion-lexicon.json
-└── models/              # Sherpa-ONNX模型（需下载）
-```
-
-## 系统要求
-
-- macOS 12+ / Windows 10+ / Linux
-- Node.js 18+
-- 麦克风权限
-- （可选）网络连接（用于AI反馈，词库分析可离线）
+- **2026-08**：WebUI 版改造——移除 Electron/sherpa-onnx 本地依赖；ASR 改 FunASR 自部署 WebSocket；LLM 改远程 API（删 ollama）；部署改 Nginx 打包。原 Electron 源码保留在仓库作功能参考。
 
 ## License
 
 MIT
-

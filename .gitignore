@@ -1,10 +1,13 @@
+# 依赖
 node_modules/
-models/*.onnx
-models/sherpa-onnx-*/
-dist/
-.DS_Store
-.idea/
 
-demo-*.html
-prompt-playground.html
-listenhub-*.png
+# 运行时配置与密钥（不入库）
+config/settings.json
+.env
+
+# 日志
+*.log
+
+# 系统
+.DS_Store
+Thumbs.db

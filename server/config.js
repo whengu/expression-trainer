@@ -1,0 +1,119 @@
+// 配置加载：环境变量优先，其次 config/settings.json
+// 铁律：所有写入只落在项目目录内（config/），不写系统临时目录
+const fs = require('fs');
+const path = require('path');
+
+const PROJECT_ROOT = path.join(__dirname, '..');
+const CONFIG_DIR = path.join(PROJECT_ROOT, 'config');
+const SETTINGS_PATH = path.join(CONFIG_DIR, 'settings.json');
+
+const DEFAULTS = {
+  server: {
+    host: process.env.EXPR_HOST || '127.0.0.1', // 部署可改（.env/config）；默认本机
+    port: parseInt(process.env.EXPR_PORT || '3000', 10),
+  },
+  llm: {
+    provider: 'deepseek', // deepseek | openai | custom
+    providers: {
+      deepseek: { apiKey: '', model: 'deepseek-chat' },
+      openai: { apiKey: '', model: 'gpt-4o-mini' },
+      custom: { apiKey: '', baseUrl: '', model: '' },
+    },
+  },
+  asr: {
+    provider: 'funasr', // 'funasr'（旧版 10096, 2pass）| 'funasr-v2'（新版 10095, START/STOP）
+    funasr: { wsUrl: '', token: '' }, // 旧版：地址/token 待用户提供，配置化
+    funasrV2: { wsUrl: '', token: '' }, // 新版实时（FunASR v2）：地址/token 待用户提供，配置化
+  },
+  feedback: {
+    autoThresholdChars: 50, // 自动触发阈值（字）
+    cooldownSec: 8,         // 冷却（秒）
+  },
+  prompts: {
+    // 自定义 Prompt（可选，覆盖 lib/prompts.js 默认模板）；值为 '' 时用默认
+    realtime: '',
+    report: '',
+  },
+};
+
+// 从 .env 覆盖（简单解析，不引依赖）
+function loadEnv() {
+  const envPath = path.join(PROJECT_ROOT, '.env');
+  if (!fs.existsSync(envPath)) return {};
+  const env = {};
+  for (const line of fs.readFileSync(envPath, 'utf-8').split(/\r?\n/)) {
+    const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/i);
+    if (m && !line.trim().startsWith('#')) env[m[1]] = m[2];
+  }
+  return env;
+}
+
+function deepMerge(base, override) {
+  const out = { ...base };
+  for (const [k, v] of Object.entries(override || {})) {
+    if (v && typeof v === 'object' && !Array.isArray(v) && base[k] && typeof base[k] === 'object') {
+      out[k] = deepMerge(base[k], v);
+    } else if (v !== undefined) {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+let cached = null;
+
+function loadSettings() {
+  if (fs.existsSync(SETTINGS_PATH)) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf-8'));
+      // 合并 providers 默认缺省（避免新字段缺失）
+      for (const p of ['deepseek', 'openai', 'custom']) {
+        raw.llm = raw.llm || {};
+        raw.llm.providers = raw.llm.providers || {};
+        raw.llm.providers[p] = { ...DEFAULTS.llm.providers[p], ...(raw.llm.providers[p] || {}) };
+      }
+      if (raw.asr) {
+        raw.asr.funasr = { ...DEFAULTS.asr.funasr, ...(raw.asr.funasr || {}) };
+        raw.asr.funasrV2 = { ...DEFAULTS.asr.funasrV2, ...(raw.asr.funasrV2 || {}) };
+      }
+      return deepMerge(DEFAULTS, raw);
+    } catch (e) {
+      console.warn('[config] settings.json 解析失败，使用默认配置:', e.message);
+    }
+  }
+  return JSON.parse(JSON.stringify(DEFAULTS));
+}
+
+function getConfig() {
+  if (!cached) {
+    cached = loadSettings();
+    // 应用 .env 覆盖层
+    const env = loadEnv();
+    if (env.EXPR_HOST) cached.server.host = env.EXPR_HOST.trim();
+    if (env.EXPR_PORT) {
+      const p = parseInt(env.EXPR_PORT.trim(), 10);
+      if (Number.isInteger(p) && p > 0 && p < 65536) cached.server.port = p;
+      else console.warn('[config] EXPR_PORT 非法，使用默认', cached.server.port);
+    }
+    if (env.LLM_PROVIDER) { cached.llm.provider = env.LLM_PROVIDER.trim(); }
+    if (env.LLM_API_KEY) {
+      const p = cached.llm.provider;
+      if (cached.llm.providers[p]) cached.llm.providers[p].apiKey = env.LLM_API_KEY;
+    }
+    if (env.ASR_WS_URL) cached.asr.funasr.wsUrl = env.ASR_WS_URL;
+    if (env.ASR_TOKEN) cached.asr.funasr.token = env.ASR_TOKEN;
+    // 新版实时（v2）独立环境变量，避免与旧版 ASR_WS_URL/ASR_TOKEN 语义混淆
+    if (env.ASR_V2_WS_URL) cached.asr.funasrV2.wsUrl = env.ASR_V2_WS_URL.trim();
+    if (env.ASR_V2_TOKEN) cached.asr.funasrV2.token = env.ASR_V2_TOKEN.trim();
+  }
+  return cached;
+}
+
+// 设置页 PUT 时写入 settings.json（仅写项目目录内）
+function saveSettings(settings) {
+  fs.mkdirSync(CONFIG_DIR, { recursive: true });
+  fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2), 'utf-8');
+  cached = null; // 下次重新加载
+}
+
+module.exports = { getConfig, saveSettings, SETTINGS_PATH, DEFAULTS };

@@ -1,0 +1,18 @@
+{
+  "llm": {
+    "provider": "deepseek",
+    "providers": {
+      "deepseek": { "apiKey": "", "model": "deepseek-chat" },
+      "openai": { "apiKey": "", "model": "gpt-4o-mini" },
+      "custom": { "apiKey": "", "baseUrl": "", "model": "" }
+    }
+  },
+  "asr": {
+    "provider": "funasr",
+    "funasr": { "wsUrl": "", "token": "" }
+  },
+  "feedback": {
+    "autoThresholdChars": 50,
+    "cooldownSec": 8
+  }
+}

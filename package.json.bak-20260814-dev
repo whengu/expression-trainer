@@ -5,7 +5,7 @@
   "description": "宇宙无敌表达训练系统 - WebUI 版",
   "main": "server/index.js",
   "scripts": {
-    "dev": "node server/index.js",
+    "start": "node server/index.js",
     "check": "node scripts/check-syntax.js"
   },
   "keywords": ["expression", "training", "speech", "asr", "chinese"],
