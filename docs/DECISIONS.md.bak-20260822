@@ -16,13 +16,6 @@
 | 阈值默认 | 设计评审 | 50 字自动触发 / 冷却 8s，可调 |
 | 语法检查 | 用户确认 | `npm run check`（node --check 遍历），禁止用 build 检查 |
 | 快速检查 bug | 子智能体根因调查 | 仅修改 Hermes LINTERS 表剔除 .js/.ts（本地最小修复） |
-| FunASR 协议（旧版 10096） | 子智能体调查官方仓库（58 API 调用） | 旧版 2pass：上行配置JSON→裸PCM→结束JSON、下行 2pass-offline/offline=定稿、is_end=完成确认；规范存 docs/FUNASR_WEBSOCKET_SPEC.md（旧版协议） |
-| FunASR 其他版本协议（新版实时 10095） | 飞书部署文档 §7.2 + commit 0fb6745 实测 | 新版实时：START→裸PCM→STOP，下行 started/partial/is_final/stopped/error；无鉴权；**旧 10096 与 10095 并存，勿与旧版 2pass 混淆** |
+| FunASR 协议 | 子智能体调查官方仓库（58 API 调用） | 端口 10095、无鉴权、上行配置JSON→裸PCM→结束JSON、下行2pass-offline=定稿；规范存 docs/FUNASR_WEBSOCKET_SPEC.md |
 | WS 会话并发 | 代码审查优化 | 每连接独立 FunASR 会话（Map 隔离），避免多连接踩踏 |
 | Linux 后台启动 | 排查经验 | git-bash background 下 node 需 pty=true；Windows 上 powershell Stop-Process 清理残留 |
-
-## 2026-08-22
-
-| 决策 | 依据 | 结论 |
-|------|------|------|
-| ASR v2 切换（D1/D2） | owner PRD 2026-08-22 裁决 | 运行配置 settings.json 默认启用 funasr-v2（10095 START/STOP，中英混说）；代码 DEFAULTS.provider 保持 'funasr'（出厂兜底）；provider 取值 'funasr'/'funasr-v2' 白名单双轨；旧版 10096 块保留可切回；不接入 10097 离线 HTTP |

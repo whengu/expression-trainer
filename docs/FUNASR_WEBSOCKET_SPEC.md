@@ -1,5 +1,7 @@
 # FunASR WebSocket 流式识别对接规范（Node.js ws 客户端版）
 
+> ⚠️ **本文档仅描述旧版 2pass 协议**；生产环境旧服务=10096，新版实时=10095（见 DECISIONS.md §2026-08-22）。新版协议（START→裸PCM→STOP）实现见 server/asr/client.js `createFunasrV2Session`。
+
 > 调查基准：modelscope/FunASR `main` 分支官方仓库（截至 2026-08）。
 > 直接证据来源（仓库内路径）：
 > - `runtime/docs/websocket_protocol_zh.md` —— 官方通信协议文档（最权威）

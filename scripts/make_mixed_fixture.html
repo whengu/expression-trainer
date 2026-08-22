@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ASR 中英混说 fixture 录制助手</title>
+<style>
+  body { font-family: system-ui, "Microsoft YaHei", sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; line-height: 1.6; }
+  textarea { width: 100%; height: 72px; font-size: 15px; padding: 8px; box-sizing: border-box; }
+  button { font-size: 15px; padding: 8px 18px; margin: 4px 6px 4px 0; cursor: pointer; }
+  #status { margin: 12px 0; padding: 10px; background: #f4f4f4; border-radius: 6px; min-height: 24px; white-space: pre-wrap; }
+  .warn { color: #a05a00; }
+  .ok { color: #0a7a2a; }
+  code { background: #eee; padding: 1px 5px; border-radius: 3px; }
+</style>
+</head>
+<body>
+<h1>ASR 中英混说 fixture 录制助手</h1>
+<p>用途：为本项目 <code>scripts/mixed_test.wav</code> 录制/重新生成验收 audio fixture。
+   输出规格固定为 <b>16 kHz / 单声道 / 16-bit PCM（WAV）</b>，与 <code>public/recorder.js</code> 采集链路一致
+   （<code>AudioContext({sampleRate:16000})</code>）。纯前端实现，零依赖。</p>
+
+<h2>语料（可编辑）</h2>
+<textarea id="corpus">大家好，今天我们来聊聊在 Apple 的工作体验，我觉得 teamwork 很重要。</textarea>
+
+<h2>操作</h2>
+<button id="btnPreview">试听语料（系统 TTS 朗读）</button>
+<button id="btnRec">开始录音（麦克风）</button>
+<button id="btnStop" disabled>停止并导出 WAV</button>
+<p class="warn">无麦克风授权时：点「试听语料」让系统 TTS 朗读，再用系统录音工具（或打开本页麦克风录扬声器）录下。</p>
+
+<div id="status">就绪。点「开始录音」，说完后点「停止并导出 WAV」，浏览器将下载 mixed_test.wav 到本地，手动保存到 scripts/。</div>
+
+<script>
+(() => {
+  const corpusEl = document.getElementById('corpus');
+  const btnPreview = document.getElementById('btnPreview');
+  const btnRec = document.getElementById('btnRec');
+  const btnStop = document.getElementById('btnStop');
+  const statusEl = document.getElementById('status');
+
+  function log(s, cls) {
+    statusEl.textContent = s;
+    statusEl.className = 'info' + (cls ? ' ' + cls : '');
+  }
+
+  // 试听：speechSynthesis 朗读（系统 TTS，退化模式，不落盘 / 不走网络模型）
+  btnPreview.addEventListener('click', () => {
+    const text = corpusEl.value.trim();
+    if (!text) { log('语料为空'); return; }
+    if (!('speechSynthesis' in window)) { log('当前浏览器不支持 speechSynthesis，请用麦克风录音。', 'warn'); return; }
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'zh-CN';
+    u.rate = 0.9;
+    speechSynthesis.speak(u);
+    log('正在用系统 TTS 朗读…（试听，无法直接捕获为文件，需另录）。', 'warn');
+  });
+
+  // ---- 麦克风录音（16k mono 16bit）----
+  let audioCtx = null;
+  let stream = null;
+  let chunks = [];
+  let durMs = 0;
+
+  function startRec() {
+    // 与 public/recorder.js 同构：AudioContext 显式 16000 → ScriptProcessor → 收集 PCM
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+    const src = audioCtx.createMediaStreamSource(stream);
+    const sp = audioCtx.createScriptProcessor(4096, 1, 1);
+    chunks = [];
+    durMs = 0;
+    sp.onaudioprocess = (e) => {
+      const data = e.inputBuffer.getChannelData(0); // Float32 [-1,1]
+      chunks.push(new Float32Array(data));
+      durMs = Math.round(chunks.reduce((n, c) => n + c.length, 0) / 16000 * 1000);
+    };
+    src.connect(sp);
+    sp.connect(audioCtx.destination); // 保持图活跃
+    return sp;
+  }
+
+  function float32ToInt16(chunks) {
+    // 拼接 Float32 → Int16LE
+    const total = chunks.reduce((n, c) => n + c.length, 0);
+    const out = new Int16Array(total);
+    let off = 0;
+    for (const c of chunks) {
+      for (let i = 0; i < c.length; i++) {
+        let s = Math.max(-1, Math.min(1, c[i]));
+        out[off++] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      }
+    }
+    return out;
+  }
+
+  function encodeWav(pcmInt16, sampleRate) {
+    const dataSize = pcmInt16.length * 2;
+    const buf = new ArrayBuffer(44 + dataSize);
+    const v = new DataView(buf);
+    const ascii = (off, s) => { for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i)); };
+    ascii(0, 'RIFF');
+    v.setUint32(4, 36 + dataSize, true);
+    ascii(8, 'WAVE');
+    ascii(12, 'fmt ');
+    v.setUint32(16, 16, true);        // fmt chunk size
+    v.setUint16(20, 1, true);         // PCM
+    v.setUint16(22, 1, true);         // mono
+    v.setUint32(24, sampleRate, true);
+    v.setUint32(28, sampleRate * 2, true); // byte rate
+    v.setUint16(32, 2, true);         // block align
+    v.setUint16(34, 16, true);        // bits per sample
+    ascii(36, 'data');
+    v.setUint32(40, dataSize, true);
+    new Uint8Array(buf, 44).set(new Uint8Array(pcmInt16.buffer, pcmInt16.byteOffset, pcmInt16.byteLength));
+    return buf;
+  }
+
+  function downloadWav(arrayBuffer) {
+    const blob = new Blob([arrayBuffer], { type: 'audio/wav' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'mixed_test.wav';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }
+
+  btnRec.addEventListener('click', async () => {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      log('当前环境不支持 getUserMedia（非 https 或受限浏览器），请改用系统录音。', 'warn');
+      return;
+    }
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } });
+    } catch (e) {
+      log('麦克风授权失败：' + (e && e.message || e) + '。可用「试听」+ 系统录音工具制备。', 'warn');
+      return;
+    }
+    startRec();
+    btnRec.disabled = true;
+    btnStop.disabled = false;
+    log('录音中…说话（推荐语料见上方）。说完点「停止并导出 WAV」。');
+  });
+
+  btnStop.addEventListener('click', () => {
+    if (chunks.length === 0) { log('未捕获到音频数据。', 'warn'); return; }
+    btnStop.disabled = true;
+    btnRec.disabled = false;
+    const wav = encodeWav(float32ToInt16(chunks), 16000);
+    try { stream && stream.getTracks().forEach(t => t.stop()); } catch (e) {}
+    try { audioCtx && audioCtx.close(); } catch (e) {}
+    audioCtx = null;
+    downloadWav(wav);
+    log('已完成。时长约 ' + (durMs / 1000).toFixed(2) + 's（16k/mono/16bit）。请将下载的 mixed_test.wav 保存到项目 scripts/ 目录。', 'ok');
+  });
+
+  window.addEventListener('beforeunload', () => {
+    try { audioCtx && audioCtx.close(); } catch (e) {}
+  });
+})();
+</script>
+</body>
+</html>

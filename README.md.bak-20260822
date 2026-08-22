@@ -5,7 +5,7 @@
 
 ## 功能
 
-- 🎤 **实时语音识别**：FunASR / FunASR v2（新版，支持中英混说，默认）二选一（自部署 WebSocket 流式），边说边出字
+- 🎤 **实时语音识别**：FunASR（自部署，WebSocket 流式）实时转写，边说边出字
 - 📝 **全屏字幕显示**：实时显示每句话，partial/final 渐进更新，词级高亮
 - 🔍 **词库分析**：自动检测填充词、犹豫词、笼统词，给出精准替代建议（本地词库 146+ 情绪词，离线匹配，无延迟）
 - 🤖 **AI 反馈**：每 N 字触发语境化建议（DeepSeek / OpenAI / 自定义 OpenAI 兼容后端）
@@ -18,7 +18,7 @@
 |----|------|
 | 前端 | 原生 HTML/JS/CSS（零构建，`public/` 直接托管） |
 | 后端 | Node.js + Express + ws |
-| ASR | **FunASR / FunASR v2 自部署 WebSocket 流式**（官方协议，不引 SDK；v2 支持中英混说） |
+| ASR | **FunASR 自部署 WebSocket 流式**（官方协议，不引 SDK） |
 | LLM | DeepSeek / OpenAI / 自定义 OpenAI 兼容（API） |
 | 部署 | Nginx（静态 + 反代）/api 与 /ws |
 
@@ -35,7 +35,7 @@ npm run dev            # 启动 → http://localhost:3000
 
 首次使用打开设置页（⚙️）填写：
 - **AI 反馈（LLM）**：选后端 → 填 API Key → 测试连接
-- **语音识别（ASR）**：Provider 二选一 —— `FunASR`（旧版 10096，2pass，纯中文）或 `FunASR v2`（新版 10095，START/STOP，中英混说，默认启用）；分别填各自 WebSocket 地址（ws://host:port）与可选 token；亦可用 `.env` 的 `ASR_WS_URL/ASR_TOKEN`（旧版）或 `ASR_V2_WS_URL/ASR_V2_TOKEN`（新版）覆盖（优先级高于 settings.json）
+- **语音识别（ASR）**：填 FunASR WebSocket 地址（ws://host:port）与可选 token
 - **反馈触发**：自动反馈阈值（默认 50 字）
 
 配置保存在 `config/settings.json`（可用 `.env` 环境变量覆盖，见 `.env.example`）。
@@ -59,7 +59,6 @@ data/              情绪词库数据（emotion-lexicon.json）
 ## 变更记录
 
 - **2026-08**：WebUI 版改造——移除 Electron/sherpa-onnx 本地依赖；ASR 改 FunASR 自部署 WebSocket；LLM 改远程 API（删 ollama）；部署改 Nginx 打包。原 Electron 源码保留在仓库作功能参考。
-  - **2026-08-22**：ASR 默认切换 FunASR v2（10095 中英混说实时转写），旧版 10096 可一键切回；
 
 ## License
 
