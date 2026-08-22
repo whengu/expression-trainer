@@ -101,7 +101,7 @@ class SettingsPage {
     const p = (this.settings.llm && this.settings.llm.providers && this.settings.llm.providers[provider]) || {};
     this.apikeyInput.value = p.apiKey || '';
     this.customBaseUrlInput.value = p.baseUrl || '';
-    this.customModelInput.value = p.customModel || p.model || '';
+    this.customModelInput.value = p.customModel || '';
     if (p.model) this.modelSelect.value = p.model;
   }
 

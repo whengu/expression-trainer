@@ -1,0 +1,29 @@
+{
+  "llm": {
+    "provider": "custom",
+    "providers": {
+      "deepseek": { "apiKey": "", "model": "deepseek-chat" },
+      "openai": { "apiKey": "", "model": "gpt-4o-mini" },
+      "custom": {
+        "apiKey": "sk-5cd05b7929e8546b-mo1vuu-c03eb9ee",
+        "baseUrl": "http://192.168.155.44:8000/to68/router/v1",
+        "model": "dic/DeepSeek-V4-Flash-0731"
+      }
+    }
+  },
+  "asr": {
+    "provider": "funasr-v2",
+    "funasr": {
+      "wsUrl": "ws://192.168.156.68:10096",
+      "token": ""
+    },
+    "funasrV2": {
+      "wsUrl": "ws://192.168.156.68:10095",
+      "token": ""
+    }
+  },
+  "feedback": {
+    "autoThresholdChars": 50,
+    "cooldownSec": 8
+  }
+}
